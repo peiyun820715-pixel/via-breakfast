@@ -17,6 +17,13 @@
   const uid = () => `${Date.now()}-${Math.random().toString(16).slice(2)}`;
   const cleanList = (value) => value.split(/[,，]/).map((item) => item.trim()).filter(Boolean);
   const escapeHtml = (value = '') => String(value).replace(/[&<>'"]/g, (char) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#039;', '"': '&quot;' }[char]));
+  const MAX_TEXT_LENGTH = 300;
+  const MAX_IMPORT_BYTES = 1024 * 1024;
+  const MAX_IMAGE_BYTES = 2 * 1024 * 1024;
+  const MAX_RECORDS = 200;
+  const ALLOWED_IMAGE_TYPES = new Set(['image/jpeg', 'image/png', 'image/webp']);
+  const VALID_CATEGORIES = new Set(Object.keys(categoryLabels));
+  const VALID_SAFETY = new Set(['good', 'check', 'unsafe']);
 
   const defaultState = () => ({
     profile: { healthGoal: '', allergies: [], restrictions: [], dislikedFoods: [] },
@@ -24,15 +31,73 @@
   });
 
   let state = load();
-  let activePhoto = '';
+  let activePhoto = false;
+
+  function isPlainObject(value) { return value !== null && typeof value === 'object' && !Array.isArray(value); }
+  function safeText(value, maxLength = MAX_TEXT_LENGTH) { return typeof value === 'string' ? value.replace(/[\u0000-\u001F\u007F]/g, '').trim().slice(0, maxLength) : ''; }
+  function safeId(value) { const normalized = safeText(String(value || ''), 80).replace(/[^a-zA-Z0-9_-]/g, ''); return normalized || uid(); }
+  function safeDate(value) { return /^\d{4}-\d{2}-\d{2}$/.test(String(value || '')) ? String(value) : ''; }
+  function safeNumber(value, max = 100000) { return Math.min(Math.max(number(value), 0), max); }
+  function safeList(value) { return Array.isArray(value) ? value.map((item) => safeText(item, 80)).filter(Boolean).slice(0, 50) : []; }
+  function sanitizeNutrition(value) {
+    const raw = isPlainObject(value) ? value : {};
+    return Object.fromEntries(['calories', 'protein', 'carbs', 'fat', 'fiber'].map((key) => [key, raw[key] === '' || raw[key] === undefined || raw[key] === null ? '' : safeNumber(raw[key], 10000)]));
+  }
+  function sanitizeFood(value) {
+    if (!isPlainObject(value)) return null;
+    const name = safeText(value.name, 100);
+    if (!name) return null;
+    return {
+      id: safeId(value.id), name, category: VALID_CATEGORIES.has(value.category) ? value.category : 'other', unit: safeText(value.unit, 30) || '份',
+      quantity: safeNumber(value.quantity), expiry: safeDate(value.expiry), safety: VALID_SAFETY.has(value.safety) ? value.safety : 'check', nutrition: sanitizeNutrition(value.nutrition)
+    };
+  }
+  function sanitizeRecommendation(value) {
+    if (!isPlainObject(value)) return null;
+    const foods = (Array.isArray(value.foods) ? value.foods : []).map(sanitizeFood).filter(Boolean).slice(0, 30).map((food) => ({ ...food, quantity: Math.min(safeNumber(food.quantity), 1000) }));
+    if (!foods.length) return null;
+    const total = totalNutrition(foods);
+    return { id: safeId(value.id), date: safeDate(value.date) || today(), request: safeText(value.request, 100), foods, total, rules: rulesFor(foods, total), createdAt: safeText(value.createdAt, 40) || new Date().toISOString(), completed: Boolean(value.completed) };
+  }
+  function sanitizeHistory(value) {
+    if (!isPlainObject(value)) return null;
+    const actualFoods = (Array.isArray(value.actualFoods) ? value.actualFoods : []).map(sanitizeFood).filter(Boolean).slice(0, 30);
+    const feedback = isPlainObject(value.feedback) ? value.feedback : {};
+    return {
+      id: safeId(value.id), date: safeDate(value.date) || today(), recommendationId: safeId(value.recommendationId), actualFoods, total: totalNutrition(actualFoods),
+      completionRate: Math.min(Math.max(number(value.completionRate), 0), 1),
+      feedback: { satiety: safeText(feedback.satiety, 30), energy: safeText(feedback.energy, 30), digestion: safeText(feedback.digestion, 30), note: safeText(feedback.note), photoProvided: Boolean(feedback.photoProvided) },
+      createdAt: safeText(value.createdAt, 40) || new Date().toISOString()
+    };
+  }
+  function sanitizeState(candidate) {
+    if (!isPlainObject(candidate)) return defaultState();
+    const profile = isPlainObject(candidate.profile) ? candidate.profile : {};
+    const foodPreferences = isPlainObject(candidate.foodPreferences) ? candidate.foodPreferences : {};
+    const cleanPreferences = Object.entries(foodPreferences).slice(0, 200).reduce((result, [name, value]) => {
+      const safeName = safeText(name, 100); if (!safeName || ['__proto__', 'constructor', 'prototype'].includes(safeName) || !isPlainObject(value)) return result;
+      result[safeName] = { offered: safeNumber(value.offered, 100000), accepted: safeNumber(value.accepted, 100000) }; return result;
+    }, Object.create(null));
+    return {
+      profile: { healthGoal: safeText(profile.healthGoal, 50), allergies: safeList(profile.allergies), restrictions: safeList(profile.restrictions), dislikedFoods: safeList(profile.dislikedFoods) },
+      inventory: (Array.isArray(candidate.inventory) ? candidate.inventory : []).map(sanitizeFood).filter(Boolean).slice(0, MAX_RECORDS),
+      recommendations: (Array.isArray(candidate.recommendations) ? candidate.recommendations : []).map(sanitizeRecommendation).filter(Boolean).slice(-MAX_RECORDS),
+      history: (Array.isArray(candidate.history) ? candidate.history : []).map(sanitizeHistory).filter(Boolean).slice(-MAX_RECORDS), foodPreferences: cleanPreferences
+    };
+  }
 
   function load() {
     try {
       const stored = JSON.parse(localStorage.getItem(STORAGE_KEY));
-      return stored ? { ...defaultState(), ...stored, profile: { ...defaultState().profile, ...stored.profile } } : defaultState();
+      return stored ? sanitizeState(stored) : defaultState();
     } catch { return defaultState(); }
   }
-  function save() { localStorage.setItem(STORAGE_KEY, JSON.stringify(state)); }
+  function save() {
+    state = sanitizeState(state);
+    const serialized = JSON.stringify(state);
+    if (serialized.length > MAX_IMPORT_BYTES) { toast('資料量過大，未儲存；請移除部分早餐紀錄後再試。'); return false; }
+    try { localStorage.setItem(STORAGE_KEY, serialized); return true; } catch { toast('瀏覽器無法儲存資料，請先匯出備份並清理空間。'); return false; }
+  }
   function toast(message) {
     const node = $('#toast'); node.textContent = message; node.classList.add('show');
     clearTimeout(toast.timer); toast.timer = setTimeout(() => node.classList.remove('show'), 2600);
@@ -139,10 +204,10 @@
     const list = $('#inventory-list');
     if (!state.inventory.length) { list.innerHTML = '<div class="empty-state">尚無食材。從「新增食材」建立你的庫存。</div>'; return; }
     list.innerHTML = state.inventory.map((item) => `<article class="inventory-item">
-      <div><h3>${escapeHtml(item.name)} <span class="category">${categoryLabels[item.category]}</span></h3><span class="inventory-meta">${item.expiry ? `到期：${item.expiry}` : '未設定到期日'} · 保存：${item.safety === 'good' ? '良好' : item.safety === 'check' ? '需確認' : '不適合食用'}</span></div>
+      <div><h3>${escapeHtml(item.name)} <span class="category">${escapeHtml(categoryLabels[item.category] || categoryLabels.other)}</span></h3><span class="inventory-meta">${item.expiry ? `到期：${escapeHtml(item.expiry)}` : '未設定到期日'} · 保存：${item.safety === 'good' ? '良好' : item.safety === 'check' ? '需確認' : '不適合食用'}</span></div>
       <strong>${formatNumber(item.quantity)} ${escapeHtml(item.unit)}</strong>
       <span class="inventory-meta">${item.nutrition?.calories !== '' && item.nutrition?.calories !== undefined ? `${formatNumber(item.nutrition.calories)} kcal／份` : '營養資料待補'}</span>
-      <div class="item-actions"><button class="text-button" data-edit-food="${item.id}">編輯</button><button class="text-button danger" data-delete-food="${item.id}">刪除</button></div>
+      <div class="item-actions"><button class="text-button" data-edit-food="${escapeHtml(item.id)}">編輯</button><button class="text-button danger" data-delete-food="${escapeHtml(item.id)}">刪除</button></div>
     </article>`).join('');
   }
   function latestRecommendation() { return [...state.recommendations].sort((a, b) => b.createdAt.localeCompare(a.createdAt))[0]; }
@@ -163,7 +228,7 @@
     const select = $('#feedback-recommendation');
     const previous = select.value;
     const options = [...state.recommendations].filter((item) => !item.completed).sort((a, b) => b.createdAt.localeCompare(a.createdAt));
-    select.innerHTML = `<option value="">${options.length ? '請選擇一份推薦' : '尚無可回饋的推薦'}</option>${options.map((item) => `<option value="${item.id}">${item.date}｜${item.foods.map((food) => food.name).join('、')}</option>`).join('')}`;
+    select.innerHTML = `<option value="">${options.length ? '請選擇一份推薦' : '尚無可回饋的推薦'}</option>${options.map((item) => `<option value="${escapeHtml(item.id)}">${escapeHtml(item.date)}｜${item.foods.map((food) => escapeHtml(food.name)).join('、')}</option>`).join('')}`;
     select.value = options.some((item) => item.id === previous) ? previous : (options[0]?.id || '');
     renderConsumedItems();
   }
@@ -172,7 +237,7 @@
     const box = $('#consumed-items');
     if (!selected) { box.className = 'consumed-items empty-state'; box.innerHTML = '請先產生一份早餐推薦。'; return; }
     box.className = 'consumed-items';
-    box.innerHTML = `<h3>實際吃了什麼？</h3>${selected.foods.map((food) => `<label class="consumed-row"><input type="checkbox" data-consumed-id="${food.id}" checked /><span>${escapeHtml(food.name)} <small class="muted">（推薦 ${formatNumber(food.quantity)} ${escapeHtml(food.unit)}）</small></span><input aria-label="${escapeHtml(food.name)}實際份量" type="number" min="0" max="${food.quantity}" step="0.1" value="${food.quantity}" data-consumed-quantity="${food.id}" /></label>`).join('')}`;
+    box.innerHTML = `<h3>實際吃了什麼？</h3>${selected.foods.map((food) => `<label class="consumed-row"><input type="checkbox" data-consumed-id="${escapeHtml(food.id)}" checked /><span>${escapeHtml(food.name)} <small class="muted">（推薦 ${formatNumber(food.quantity)} ${escapeHtml(food.unit)}）</small></span><input aria-label="${escapeHtml(food.name)}實際份量" type="number" min="0" max="${food.quantity}" step="0.1" value="${food.quantity}" data-consumed-quantity="${escapeHtml(food.id)}" /></label>`).join('')}`;
   }
   function renderHistory() {
     const history = state.history;
@@ -181,7 +246,7 @@
     $('#stats-grid').innerHTML = [
       [`${history.length}`, '已記錄早餐'], [`${formatNumber(completion * 100)}%`, '平均完成率'], [`${formatNumber(avg('calories'))}`, '平均熱量 kcal'], [`${formatNumber(avg('protein'))}g`, '平均蛋白質']
     ].map(([value, label]) => `<div class="stat"><b>${value}</b><span>${label}</span></div>`).join('');
-    $('#history-list').innerHTML = history.length ? [...history].reverse().slice(0, 10).map((entry) => `<article class="history-item"><div><h4>${escapeHtml(entry.date)}｜${entry.actualFoods.map((food) => food.name).join('、') || '未記錄實際食用'}</h4><p>${entry.feedback.energy || '未填精神'} · ${entry.feedback.satiety || '未填飽足感'} · ${entry.feedback.digestion || '未填腸胃狀況'}${entry.feedback.note ? ` · ${escapeHtml(entry.feedback.note)}` : ''}</p></div><strong>${formatNumber(entry.total.calories)} kcal</strong></article>`).join('') : '<div class="empty-state">完成早餐回饋後，這裡會顯示你的趨勢。</div>';
+    $('#history-list').innerHTML = history.length ? [...history].reverse().slice(0, 10).map((entry) => `<article class="history-item"><div><h4>${escapeHtml(entry.date)}｜${entry.actualFoods.map((food) => escapeHtml(food.name)).join('、') || '未記錄實際食用'}</h4><p>${escapeHtml(entry.feedback.energy || '未填精神')} · ${escapeHtml(entry.feedback.satiety || '未填飽足感')} · ${escapeHtml(entry.feedback.digestion || '未填腸胃狀況')}${entry.feedback.note ? ` · ${escapeHtml(entry.feedback.note)}` : ''}</p></div><strong>${formatNumber(entry.total.calories)} kcal</strong></article>`).join('') : '<div class="empty-state">完成早餐回饋後，這裡會顯示你的趨勢。</div>';
   }
   function renderProfile() {
     $('#health-goal').value = state.profile.healthGoal;
@@ -210,6 +275,7 @@
     $('#profile-form').addEventListener('submit', saveProfile);
     $('#export-data').addEventListener('click', exportData);
     $('#import-data').addEventListener('change', importData);
+    $('#clear-data').addEventListener('click', clearLocalData);
   }
   function activateTab(id) { $$('.tab').forEach((tab) => tab.classList.toggle('active', tab.dataset.tab === id)); $$('.tab-panel').forEach((panel) => panel.classList.toggle('active', panel.id === id)); window.scrollTo({ top: 0, behavior: 'smooth' }); }
   function saveFood(event) {
@@ -230,22 +296,38 @@
     if (recommendation.error) { toast(recommendation.error); if (!state.profile.healthGoal) activateTab('profile'); else activateTab('inventory'); return; }
     state.recommendations.push(recommendation); save(); renderAll(); toast('已產生新的早餐推薦。');
   }
-  function readPhoto(event) { const file = event.target.files[0]; if (!file) { activePhoto = ''; return; } const reader = new FileReader(); reader.onload = () => { activePhoto = reader.result; }; reader.readAsDataURL(file); }
+  function readPhoto(event) {
+    const file = event.target.files[0]; activePhoto = false;
+    if (!file) return;
+    if (!ALLOWED_IMAGE_TYPES.has(file.type) || file.size > MAX_IMAGE_BYTES) { event.target.value = ''; toast('照片僅接受 JPG、PNG、WebP，且大小不可超過 2 MB。'); return; }
+    activePhoto = true;
+    toast('照片僅在本次操作確認，不會上傳或保存。');
+  }
   function submitFeedback(event) {
     event.preventDefault(); const recommendation = state.recommendations.find((item) => item.id === $('#feedback-recommendation').value); if (!recommendation) { toast('請先選擇一份早餐推薦。'); return; }
     const actualFoods = recommendation.foods.flatMap((food) => {
-      const checkbox = $(`[data-consumed-id="${food.id}"]`); const quantity = number($(`[data-consumed-quantity="${food.id}"]`).value);
+      const checkbox = $$('[data-consumed-id]').find((node) => node.dataset.consumedId === food.id);
+      const quantityInput = $$('[data-consumed-quantity]').find((node) => node.dataset.consumedQuantity === food.id);
+      const quantity = number(quantityInput?.value);
       return checkbox?.checked && quantity > 0 ? [{ ...food, quantity: Math.min(quantity, food.quantity) }] : [];
     });
     actualFoods.forEach((food) => { const item = state.inventory.find((inventory) => inventory.id === food.id); if (item) item.quantity = Math.max(0, number(item.quantity) - food.quantity); });
     recommendation.foods.forEach((food) => { const pref = state.foodPreferences[food.name] || { offered: 0, accepted: 0 }; pref.offered += 1; if (actualFoods.some((actual) => actual.id === food.id)) pref.accepted += 1; state.foodPreferences[food.name] = pref; });
-    const total = totalNutrition(actualFoods); const feedback = { satiety: $('#satiety').value, energy: $('#energy').value, digestion: $('#digestion').value, note: $('#feedback-note').value.trim(), photo: activePhoto };
+    const total = totalNutrition(actualFoods); const feedback = { satiety: $('#satiety').value, energy: $('#energy').value, digestion: $('#digestion').value, note: $('#feedback-note').value.trim(), photoProvided: activePhoto };
     state.history.push({ id: uid(), date: recommendation.date, recommendationId: recommendation.id, actualFoods, total, completionRate: recommendation.foods.length ? actualFoods.length / recommendation.foods.length : 0, feedback, createdAt: new Date().toISOString() });
-    recommendation.completed = true; save(); activePhoto = ''; $('#feedback-form').reset(); renderAll(); toast('已更新庫存、早餐紀錄與食材偏好。'); activateTab('history');
+    recommendation.completed = true; save(); activePhoto = false; $('#feedback-form').reset(); renderAll(); toast('已更新庫存、早餐紀錄與食材偏好。'); activateTab('history');
   }
   function saveProfile(event) { event.preventDefault(); state.profile = { healthGoal: $('#health-goal').value, allergies: cleanList($('#allergies').value), restrictions: cleanList($('#restrictions').value), dislikedFoods: cleanList($('#disliked-foods').value) }; save(); renderAll(); toast('個人設定已儲存。'); }
-  function exportData() { const blob = new Blob([JSON.stringify(state, null, 2)], { type: 'application/json' }); const link = document.createElement('a'); link.href = URL.createObjectURL(blob); link.download = `via-breakfast-backup-${today()}.json`; link.click(); URL.revokeObjectURL(link.href); toast('資料已匯出。'); }
-  function importData(event) { const file = event.target.files[0]; if (!file) return; const reader = new FileReader(); reader.onload = () => { try { const data = JSON.parse(reader.result); if (!data || !Array.isArray(data.inventory)) throw new Error(); state = { ...defaultState(), ...data, profile: { ...defaultState().profile, ...data.profile } }; save(); renderAll(); toast('資料已匯入。'); } catch { toast('匯入失敗：請選擇 Via 匯出的 JSON 檔。'); } finally { event.target.value = ''; } }; reader.readAsText(file); }
+  function exportData() { const blob = new Blob([JSON.stringify(sanitizeState(state), null, 2)], { type: 'application/json' }); const link = document.createElement('a'); link.href = URL.createObjectURL(blob); link.download = `via-breakfast-backup-${today()}.json`; link.click(); URL.revokeObjectURL(link.href); toast('資料已匯出。'); }
+  function importData(event) {
+    const file = event.target.files[0]; if (!file) return;
+    if (file.size > MAX_IMPORT_BYTES) { event.target.value = ''; toast('匯入檔超過 1 MB，已拒絕處理。'); return; }
+    const reader = new FileReader(); reader.onload = () => { try { const data = JSON.parse(reader.result); if (!isPlainObject(data) || !Array.isArray(data.inventory)) throw new Error(); state = sanitizeState(data); if (!save()) throw new Error(); renderAll(); toast('資料已安全匯入。'); } catch { toast('匯入失敗：檔案格式不正確或資料無法安全儲存。'); } finally { event.target.value = ''; } }; reader.readAsText(file);
+  }
+  function clearLocalData() {
+    if (!confirm('確定要清除這台裝置上的所有早餐資料嗎？此操作無法復原。')) return;
+    localStorage.removeItem(STORAGE_KEY); state = defaultState(); activePhoto = false; renderAll(); toast('這台裝置上的本機資料已清除。');
+  }
 
   bindEvents(); renderAll();
 })();

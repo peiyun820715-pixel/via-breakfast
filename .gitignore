@@ -1,0 +1,15 @@
+# Credentials and private configuration
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+credentials*
+secrets*
+
+# User-generated exports and private photos must not be published
+via-breakfast-backup-*.json
+images/breakfast_photos/*
+!images/breakfast_photos/.gitkeep
