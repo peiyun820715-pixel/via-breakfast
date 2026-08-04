@@ -1,0 +1,140 @@
+<!doctype html>
+<html lang="zh-Hant">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#165f58" />
+    <title>Via 早餐智能顧問</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <header class="site-header">
+      <div>
+        <p class="eyebrow">VIA BREAKFAST INTELLIGENCE ADVISOR</p>
+        <h1>早餐，吃得剛剛好。</h1>
+      </div>
+      <div class="header-actions">
+        <button id="export-data" class="button secondary">匯出資料</button>
+        <label class="button secondary file-button">匯入資料<input id="import-data" type="file" accept="application/json" /></label>
+      </div>
+    </header>
+
+    <main>
+      <section class="hero panel">
+        <div>
+          <p class="eyebrow accent">今日早餐規劃</p>
+          <h2 id="today-label">—</h2>
+          <p id="goal-summary" class="muted">先完成個人設定，讓推薦更貼近你的需求。</p>
+        </div>
+        <button class="button primary" data-tab-target="recommendation">開始規劃早餐 <span>→</span></button>
+      </section>
+
+      <nav class="tabs" aria-label="主要功能">
+        <button class="tab active" data-tab="recommendation">早餐推薦</button>
+        <button class="tab" data-tab="inventory">食材庫存 <span id="inventory-count" class="badge">0</span></button>
+        <button class="tab" data-tab="feedback">早餐回饋</button>
+        <button class="tab" data-tab="history">紀錄分析</button>
+        <button class="tab" data-tab="profile">個人設定</button>
+      </nav>
+
+      <section id="recommendation" class="tab-panel active">
+        <div class="section-heading">
+          <div>
+            <p class="eyebrow accent">推薦引擎</p>
+            <h2>今天想怎麼吃？</h2>
+          </div>
+          <p class="muted">推薦只會使用庫存中、保存狀況合適的食材。</p>
+        </div>
+        <form id="recommend-form" class="panel form-grid recommendation-form">
+          <label>指定想吃的食材
+            <input id="requested-food" placeholder="例如：今天想吃薯餅（可留空）" />
+          </label>
+          <label>早餐日期
+            <input id="recommend-date" type="date" />
+          </label>
+          <button class="button primary" type="submit">產生早餐推薦</button>
+        </form>
+        <div id="recommendation-empty" class="empty-state">請先新增庫存與個人健康目標，再產生第一份推薦。</div>
+        <article id="recommendation-result" class="recommendation-result hidden"></article>
+      </section>
+
+      <section id="inventory" class="tab-panel">
+        <div class="section-heading">
+          <div><p class="eyebrow accent">食材資料庫</p><h2>目前庫存</h2></div>
+          <button class="button primary" id="open-inventory-dialog">新增食材</button>
+        </div>
+        <div id="expiry-alerts"></div>
+        <div id="inventory-list" class="inventory-list"></div>
+      </section>
+
+      <section id="feedback" class="tab-panel">
+        <div class="section-heading">
+          <div><p class="eyebrow accent">早餐後</p><h2>記錄實際攝取與感受</h2></div>
+          <p class="muted">僅會扣除你確認吃掉的食材。</p>
+        </div>
+        <form id="feedback-form" class="panel feedback-form">
+          <div class="form-grid">
+            <label>對應推薦
+              <select id="feedback-recommendation"><option value="">尚無可回饋的推薦</option></select>
+            </label>
+            <label>早餐照片（選填）
+              <input id="feedback-photo" type="file" accept="image/*" />
+            </label>
+          </div>
+          <div id="consumed-items" class="consumed-items empty-state">請先產生一份早餐推薦。</div>
+          <fieldset>
+            <legend>身體狀況</legend>
+            <div class="rating-grid">
+              <label>飽足感 <select id="satiety"><option value="">未填寫</option><option value="很不足">很不足</option><option value="剛好">剛好</option><option value="很有飽足感">很有飽足感</option></select></label>
+              <label>精神 <select id="energy"><option value="">未填寫</option><option value="疲勞">疲勞</option><option value="普通">普通</option><option value="很有精神">很有精神</option></select></label>
+              <label>腸胃 <select id="digestion"><option value="">未填寫</option><option value="不舒服">不舒服</option><option value="普通">普通</option><option value="舒服">舒服</option></select></label>
+            </div>
+          </fieldset>
+          <label>補充說明
+            <textarea id="feedback-note" rows="3" placeholder="例如：上午十點有點餓，或今天很有精神。"></textarea>
+          </label>
+          <button class="button primary" type="submit">確認實際攝取並更新資料</button>
+        </form>
+      </section>
+
+      <section id="history" class="tab-panel">
+        <div class="section-heading"><div><p class="eyebrow accent">長期學習</p><h2>早餐紀錄分析</h2></div></div>
+        <div id="stats-grid" class="stats-grid"></div>
+        <div class="panel"><h3>最近早餐</h3><div id="history-list" class="history-list"></div></div>
+      </section>
+
+      <section id="profile" class="tab-panel">
+        <div class="section-heading"><div><p class="eyebrow accent">個人化基礎</p><h2>個人設定</h2></div></div>
+        <form id="profile-form" class="panel form-grid profile-form">
+          <label>健康目標
+            <select id="health-goal" required><option value="">請選擇</option><option value="健康均衡">健康均衡</option><option value="健康增重">健康增重</option><option value="增肌">增肌</option><option value="減脂">減脂</option></select>
+          </label>
+          <label>過敏食材（以逗號分隔）<input id="allergies" placeholder="例如：花生、甲殼類" /></label>
+          <label>飲食限制（以逗號分隔）<input id="restrictions" placeholder="例如：蛋奶素、無麩質" /></label>
+          <label>不喜歡食材（以逗號分隔）<input id="disliked-foods" placeholder="例如：芹菜、香菜" /></label>
+          <button class="button primary" type="submit">儲存個人設定</button>
+        </form>
+        <p class="medical-note">營養數值為一般飲食規劃估算。若有疾病、孕期、嚴重過敏或醫囑，請優先遵循醫療專業人員建議。</p>
+      </section>
+    </main>
+
+    <dialog id="inventory-dialog">
+      <form id="inventory-form" method="dialog">
+        <div class="dialog-heading"><h2 id="inventory-dialog-title">新增食材</h2><button type="button" class="icon-button" id="close-inventory-dialog" aria-label="關閉">×</button></div>
+        <input id="inventory-id" type="hidden" />
+        <div class="form-grid">
+          <label>食材名稱<input id="food-name" required placeholder="例如：雞蛋" /></label>
+          <label>分類<select id="food-category"><option value="protein">蛋白質</option><option value="fruit">水果</option><option value="vegetable">蔬菜</option><option value="main">主食／全穀</option><option value="processed">加工食品</option><option value="other">其他</option></select></label>
+          <label>數量<input id="food-quantity" required type="number" min="0" step="0.1" /></label>
+          <label>單位<input id="food-unit" required value="份" placeholder="份、g、顆" /></label>
+          <label>到期日（選填）<input id="food-expiry" type="date" /></label>
+          <label>保存狀態<select id="food-safety"><option value="good">良好</option><option value="check">需確認</option><option value="unsafe">不適合食用</option></select></label>
+        </div>
+        <fieldset><legend>每份營養（可留空，缺少時會標示為估算）</legend><div class="nutrition-inputs"><label>熱量 kcal<input id="food-calories" type="number" min="0" step="0.1" /></label><label>蛋白質 g<input id="food-protein" type="number" min="0" step="0.1" /></label><label>碳水 g<input id="food-carbs" type="number" min="0" step="0.1" /></label><label>脂肪 g<input id="food-fat" type="number" min="0" step="0.1" /></label><label>纖維 g<input id="food-fiber" type="number" min="0" step="0.1" /></label></div></fieldset>
+        <div class="dialog-actions"><button type="button" class="button secondary" id="cancel-inventory">取消</button><button class="button primary" type="submit">儲存食材</button></div>
+      </form>
+    </dialog>
+    <div id="toast" role="status" aria-live="polite"></div>
+    <script src="app.js"></script>
+  </body>
+</html>
